@@ -33,8 +33,14 @@ b = BPF(text = """
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 
+struct client {
+  u8 mac_addr[6];
+  int backend;
+};
+
 BPF_DEVMAP(cli_port, 1);
 BPF_DEVMAP(back_port, 1);
+BPF_HASH(clients, u32, struct client, 256);
 
 static inline unsigned short checksum(unsigned short *buf, int bufsz) {
     unsigned long sum = 0;
@@ -95,6 +101,19 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     old_daddr = ntohs(*(unsigned short *)&iph->daddr);
 
+    // Store client's MAC
+    struct client cli = {};
+    if (!clients.lookup(&iph->saddr)) {
+	cli.mac_addr[0] = eth->h_source[0];
+        cli.mac_addr[1] = eth->h_source[1];
+        cli.mac_addr[2] = eth->h_source[2];
+        cli.mac_addr[3] = eth->h_source[3];
+        cli.mac_addr[4] = eth->h_source[4];
+        cli.mac_addr[5] = eth->h_source[5];
+
+        clients.insert(&iph->saddr, &cli); 
+    }
+    
     // Rewrite MAC
     eth->h_dest[0]=8;
     eth->h_dest[1]=0;
@@ -155,15 +174,18 @@ int xdp_redirect_client(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
-    old_daddr = ntohs(*(unsigned short *)&iph->daddr);
+    u32 cli_addr = iph->daddr;
 
-    // Rewrite MAC
-    eth->h_dest[0]=8;
-    eth->h_dest[1]=0;
-    eth->h_dest[2]=39;
-    eth->h_dest[3]=40;
-    eth->h_dest[4]=202;
-    eth->h_dest[5]=197;
+    // Rewrite clients MAC
+    struct client *cli = clients.lookup(&iph->daddr);
+    if (cli) {
+	eth->h_dest[0]= cli->mac_addr[0];
+        eth->h_dest[1]= cli->mac_addr[1];
+        eth->h_dest[2]= cli->mac_addr[2];
+        eth->h_dest[3]= cli->mac_addr[3];
+        eth->h_dest[4]= cli->mac_addr[4];
+        eth->h_dest[5]= cli->mac_addr[5];
+    }
 
     // Update IP checksum
     iph->saddr = htonl(167772418);
@@ -174,7 +196,7 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     sum = old_daddr + (~ntohs(*(unsigned short *)&iph->daddr) & 0xffff);
     sum += ntohs(tcph->check);
     sum = (sum & 0xffff) + (sum>>16);
-    tcph->check = htons(sum + (sum>>16) - 256 - 1);
+    tcph->check = htons(sum + (sum>>16) + 2304 - 1);
 
     return cli_port.redirect_map(0, 0);
 }
