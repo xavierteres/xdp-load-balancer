@@ -41,6 +41,7 @@ struct client {
 BPF_DEVMAP(cli_port, 1);
 BPF_DEVMAP(back_port, 1);
 BPF_HASH(clients, u32, struct client, 256);
+BPF_ARRAY(next_back, int, 1);
 
 static inline unsigned short checksum(unsigned short *buf, int bufsz) {
     unsigned long sum = 0;
@@ -101,29 +102,66 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     old_daddr = ntohs(*(unsigned short *)&iph->daddr);
 
+    int n_back = 0;
     // Store client's MAC
-    struct client cli = {};
-    if (!clients.lookup(&iph->saddr)) {
-	cli.mac_addr[0] = eth->h_source[0];
-        cli.mac_addr[1] = eth->h_source[1];
-        cli.mac_addr[2] = eth->h_source[2];
-        cli.mac_addr[3] = eth->h_source[3];
-        cli.mac_addr[4] = eth->h_source[4];
-        cli.mac_addr[5] = eth->h_source[5];
+    struct client *cli = clients.lookup(&iph->saddr); 
+    if (!cli) {
+        struct client new_cli = {};
+	new_cli.mac_addr[0] = eth->h_source[0];
+        new_cli.mac_addr[1] = eth->h_source[1];
+        new_cli.mac_addr[2] = eth->h_source[2];
+        new_cli.mac_addr[3] = eth->h_source[3];
+        new_cli.mac_addr[4] = eth->h_source[4];
+        new_cli.mac_addr[5] = eth->h_source[5];
 
-        clients.insert(&iph->saddr, &cli); 
+        int key = 0;
+        int *next = next_back.lookup(&key);
+        
+        if (next && *next == 1) {
+            n_back = 1;
+        }
+        else  {
+            n_back = 0;
+        }
+
+        new_cli.backend = n_back;
+
+        clients.insert(&iph->saddr, &new_cli); 
+    } else {
+        n_back = cli->backend;
+    }
+
+    int new_back = 1; 
+    if(n_back == 0) {
+        // Rewrite MAC
+	eth->h_dest[0]=8;
+	eth->h_dest[1]=0;
+	eth->h_dest[2]=39;
+	eth->h_dest[3]=57;
+	eth->h_dest[4]=195;
+	eth->h_dest[5]=67;
+	
+	// Update IP checksum
+	iph->daddr = htonl(167772161);
+    }
+    else {
+        // Rewrite MAC
+        eth->h_dest[0]=8;
+        eth->h_dest[1]=0;
+        eth->h_dest[2]=39;
+        eth->h_dest[3]=233;
+        eth->h_dest[4]=4;
+	eth->h_dest[5]=69;
+	
+	// Update IP checksum
+	iph->daddr = htonl(167772162);
+        
+        new_back = 0;
     }
     
-    // Rewrite MAC
-    eth->h_dest[0]=8;
-    eth->h_dest[1]=0;
-    eth->h_dest[2]=39;
-    eth->h_dest[3]=57;
-    eth->h_dest[4]=195;
-    eth->h_dest[5]=67;
+    int key = 0;
+    next_back.update(&key, &new_back);
 
-    // Update IP checksum
-    iph->daddr = htonl(167772161);
     iph->check = 0;
     iph->check = checksum((unsigned short *)iph, sizeof(struct iphdr));
 
@@ -131,13 +169,13 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     sum = old_daddr + (~ntohs(*(unsigned short *)&iph->daddr) & 0xffff);
     sum += ntohs(tcph->check);
     sum = (sum & 0xffff) + (sum>>16);
-    tcph->check = htons(sum + (sum>>16) + 256 + 1);
+    tcph->check = htons(sum + (sum>>16) + 256 + 1 - n_back);
 
     return back_port.redirect_map(0, 0);
 }
 
 int xdp_redirect_client(struct xdp_md *ctx) {
-    unsigned short old_daddr;
+    unsigned short old_saddr;
     unsigned long sum;
 
     uint16_t h_proto;
@@ -176,6 +214,9 @@ int xdp_redirect_client(struct xdp_md *ctx) {
 
     u32 cli_addr = iph->daddr;
 
+    old_saddr = ntohs(*(unsigned short *)&iph->saddr);
+
+    int b = 0;
     // Rewrite clients MAC
     struct client *cli = clients.lookup(&iph->daddr);
     if (cli) {
@@ -185,6 +226,7 @@ int xdp_redirect_client(struct xdp_md *ctx) {
         eth->h_dest[3]= cli->mac_addr[3];
         eth->h_dest[4]= cli->mac_addr[4];
         eth->h_dest[5]= cli->mac_addr[5];
+        b = cli->backend;
     }
 
     // Update IP checksum
@@ -193,11 +235,11 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     iph->check = checksum((unsigned short *)iph, sizeof(struct iphdr));
 
     // Update TCP checksum
-    sum = old_daddr + (~ntohs(*(unsigned short *)&iph->daddr) & 0xffff);
+    sum = old_saddr + (~ntohs(*(unsigned short *)&iph->saddr) & 0xffff);
     sum += ntohs(tcph->check);
     sum = (sum & 0xffff) + (sum>>16);
-    tcph->check = htons(sum + (sum>>16) + 2304 - 1);
-
+    
+    tcph->check = htons(sum + (sum>>16) - 257 + b);
     return cli_port.redirect_map(0, 0);
 }
 """, cflags=["-w"])
@@ -206,6 +248,8 @@ cli_port = b.get_table("cli_port")
 cli_port[0] = ct.c_int(cli_idx)
 back_port = b.get_table("back_port")
 back_port[0] = ct.c_int(back_idx)
+next_back = b.get_table("next_back")
+next_back[0] = ct.c_int(0)
 
 cli_fn = b.load_func("xdp_load_balancer", BPF.XDP)
 back_fn = b.load_func("xdp_redirect_client", BPF.XDP)
