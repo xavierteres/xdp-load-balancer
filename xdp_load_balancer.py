@@ -18,7 +18,6 @@ cli_if = sys.argv[1]
 # Backends interface
 back_if = sys.argv[2]
 
-# Out interface id
 ip = pyroute2.IPRoute()
 cli_idx = ip.link_lookup(ifname=cli_if)[0]
 back_idx = ip.link_lookup(ifname=back_if)[0]
@@ -257,16 +256,21 @@ int xdp_redirect_client(struct xdp_md *ctx) {
 }
 """, cflags=["-w"])
 
+# Clients interface
 cli_port = b.get_table("cli_port")
 cli_port[0] = ct.c_int(cli_idx)
+# Backends interface
 back_port = b.get_table("back_port")
 back_port[0] = ct.c_int(back_idx)
+# Next backend map
 next_back = b.get_table("next_back")
 next_back[0] = ct.c_int(0)
 
+# Get functions
 cli_fn = b.load_func("xdp_load_balancer", BPF.XDP)
 back_fn = b.load_func("xdp_redirect_client", BPF.XDP)
 
+# Attach XDP functions
 b.attach_xdp(cli_if, cli_fn, flags)
 b.attach_xdp(back_if, back_fn, flags)
 
@@ -278,5 +282,6 @@ while 1:
         print("Removing filter from device")
         break
 
+# Remove XDP functions
 b.remove_xdp(cli_if, flags)
 b.remove_xdp(back_if, flags)
