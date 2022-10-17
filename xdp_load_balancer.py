@@ -102,15 +102,15 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
-    // Client's @IP
+    // Old destination IP addr (to compute checksum)
     old_daddr = ntohs(*(unsigned short *)&iph->daddr);
 
     int n_back = 0;
 
-    // Store client's @MAC
     struct client *cli = clients.lookup(&iph->saddr);
     if (!cli) { // Check if client is new
         struct client new_cli = {};
+	
 	new_cli.mac_addr[0] = eth->h_source[0];
         new_cli.mac_addr[1] = eth->h_source[1];
         new_cli.mac_addr[2] = eth->h_source[2];
@@ -228,7 +228,7 @@ int xdp_redirect_client(struct xdp_md *ctx) {
 
     int b = 0;
     
-    // Rewrite clients MAC
+    // Rewrite clients MAC addr
     struct client *cli = clients.lookup(&iph->daddr);
     if (cli) {
 	eth->h_dest[0]= cli->mac_addr[0];
