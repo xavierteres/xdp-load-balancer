@@ -73,6 +73,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     void* data_end = (void*)(long)ctx->data_end;
     void* data = (void*)(long)ctx->data;
   
+    // Ethernet packet
     struct ethhdr *eth = data;
 
     nh_off = sizeof(*eth);
@@ -83,6 +84,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
+    // IP packet
     struct iphdr *iph = data + nh_off;
 
     nh_off += sizeof(struct iphdr);
@@ -94,18 +96,21 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
+    // TCP packet
     struct tcphdr *tcph = data + nh_off;
     nh_off += sizeof(struct tcphdr);
     if (data + nh_off > data_end) {
         return XDP_PASS;
     }
 
+    // Client's @IP
     old_daddr = ntohs(*(unsigned short *)&iph->daddr);
 
     int n_back = 0;
-    // Store client's MAC
-    struct client *cli = clients.lookup(&iph->saddr); 
-    if (!cli) {
+
+    // Store client's @MAC
+    struct client *cli = clients.lookup(&iph->saddr);
+    if (!cli) { // Check if client is new
         struct client new_cli = {};
 	new_cli.mac_addr[0] = eth->h_source[0];
         new_cli.mac_addr[1] = eth->h_source[1];
@@ -126,13 +131,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
         new_cli.backend = n_back;
 
+	// Insert new client
         clients.insert(&iph->saddr, &new_cli); 
     } else {
         n_back = cli->backend;
     }
 
     int new_back = 1; 
-    if(n_back == 0) {
+    if(n_back == 0) { // Backend 0
         // Rewrite MAC
 	eth->h_dest[0]=8;
 	eth->h_dest[1]=0;
@@ -141,10 +147,10 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	eth->h_dest[4]=195;
 	eth->h_dest[5]=67;
 	
-	// Update IP checksum
+	// Update destination address
 	iph->daddr = htonl(167772161);
     }
-    else {
+    else { // Backend 1
         // Rewrite MAC
         eth->h_dest[0]=8;
         eth->h_dest[1]=0;
@@ -153,24 +159,27 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         eth->h_dest[4]=4;
 	eth->h_dest[5]=69;
 	
-	// Update IP checksum
+	// Update destination address
 	iph->daddr = htonl(167772162);
         
         new_back = 0;
     }
     
+    // Update next backend
     int key = 0;
     next_back.update(&key, &new_back);
 
+    // Update packet IP checksum
     iph->check = 0;
     iph->check = checksum((unsigned short *)iph, sizeof(struct iphdr));
 
-    // Update TCP checksum
+    // Update packet TCP checksum
     sum = old_daddr + (~ntohs(*(unsigned short *)&iph->daddr) & 0xffff);
     sum += ntohs(tcph->check);
     sum = (sum & 0xffff) + (sum>>16);
     tcph->check = htons(sum + (sum>>16) + 256 + 1 - n_back);
 
+    // Redirect
     return back_port.redirect_map(0, 0);
 }
 
@@ -191,10 +200,12 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     if (data + nh_off  > data_end)
         return XDP_PASS;
     
+    // Ethernet packet
     if(ntohs(eth->h_proto) != ETH_P_IP) {
         return XDP_PASS;
     }
 
+    // IP packet
     struct iphdr *iph = data + nh_off;
 
     nh_off += sizeof(struct iphdr);
@@ -205,7 +216,8 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     if (iph->protocol != IPPROTO_TCP) {
         return XDP_PASS;
     }
-
+    
+    // TCP packet
     struct tcphdr *tcph = data + nh_off;
     nh_off += sizeof(struct tcphdr);
     if (data + nh_off > data_end) {
@@ -213,10 +225,10 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     }
 
     u32 cli_addr = iph->daddr;
-
     old_saddr = ntohs(*(unsigned short *)&iph->saddr);
 
     int b = 0;
+    
     // Rewrite clients MAC
     struct client *cli = clients.lookup(&iph->daddr);
     if (cli) {
@@ -238,8 +250,9 @@ int xdp_redirect_client(struct xdp_md *ctx) {
     sum = old_saddr + (~ntohs(*(unsigned short *)&iph->saddr) & 0xffff);
     sum += ntohs(tcph->check);
     sum = (sum & 0xffff) + (sum>>16);
-    
     tcph->check = htons(sum + (sum>>16) - 257 + b);
+    
+    // Redirect
     return cli_port.redirect_map(0, 0);
 }
 """, cflags=["-w"])
