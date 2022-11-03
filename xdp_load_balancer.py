@@ -240,8 +240,9 @@ int xdp_redirect_client(struct xdp_md *ctx) {
         b = cli->backend;
     }
 
-    // Update IP checksum
     iph->saddr = htonl(167772418);
+    
+    // Update IP checksum
     iph->check = 0;
     iph->check = checksum((unsigned short *)iph, sizeof(struct iphdr));
 
@@ -274,12 +275,12 @@ back_fn = b.load_func("xdp_redirect_client", BPF.XDP)
 b.attach_xdp(cli_if, cli_fn, flags)
 b.attach_xdp(back_if, back_fn, flags)
 
-print("Filter attached")
+print("Started load balancer")
 while 1:
     try:
         time.sleep(1)
     except KeyboardInterrupt:
-        print("Removing filter from device")
+        print("Stopped load balancer")
         break
 
 # Remove XDP functions
